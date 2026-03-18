@@ -1,0 +1,37 @@
+# ROS catkin 忽略文件
+build/
+devel/
+install/
+*.pyc
+__pycache__/
+*.log
+
+# Python virtual environment
+venv*/
+venv*/
+.venv/
+ENV/
+env/
+ENV310/
+venv310/
+
+# PyTorch / 机器学习大文件（可选）
+*.so
+*.pth
+*.bin
+__pycache__/
+*.pyc
+# Python virtual environment
+venv*/
+venv*/
+.venv/
+ENV/
+env/
+ENV310/
+venv310/
+# PyTorch / 机器学习大文件（可选）
+*.so
+*.pth
+*.bin
+__pycache__/
+*.pyc
