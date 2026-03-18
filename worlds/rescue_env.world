@@ -1,0 +1,42 @@
+<?xml version="1.0" ?>
+<sdf version="1.5">
+  <world name="rescue_world">
+    <include><uri>model://sun</uri></include>
+    <include><uri>model://ground_plane</uri></include>
+
+    <model name="boundary_walls">
+      <static>true</static>
+      <link name="link">
+        <collision name="wall1"><pose>5 0 1 0 0 0</pose><geometry><box><size>0.2 10 2</size></box></geometry></collision>
+        <visual name="v1"><pose>5 0 1 0 0 0</pose><geometry><box><size>0.2 10 2</size></box></geometry></visual>
+        
+        <collision name="wall2"><pose>-5 0 1 0 0 0</pose><geometry><box><size>0.2 10 2</size></box></geometry></collision>
+        <visual name="v2"><pose>-5 0 1 0 0 0</pose><geometry><box><size>0.2 10 2</size></box></geometry></visual>
+        
+        <collision name="wall3"><pose>0 5 1 0 0 0</pose><geometry><box><size>10 0.2 2</size></box></geometry></collision>
+        <visual name="v3"><pose>0 5 1 0 0 0</pose><geometry><box><size>10 0.2 2</size></box></geometry></visual>
+        
+        <collision name="wall4"><pose>0 -5 1 0 0 0</pose><geometry><box><size>10 0.2 2</size></box></geometry></collision>
+        <visual name="v4"><pose>0 -5 1 0 0 0</pose><geometry><box><size>10 0.2 2</size></box></geometry></visual>
+      </link>
+    </model>
+
+    <model name="obstacle_pillar_1">
+      <static>true</static>
+      <pose>2 2 1 0 0 0</pose>
+      <link name="link">
+        <collision name="c1"><geometry><cylinder><radius>0.5</radius><length>2</length></cylinder></geometry></collision>
+        <visual name="v1"><geometry><cylinder><radius>0.5</radius><length>2</length></cylinder></geometry></visual>
+      </link>
+    </model>
+
+    <model name="obstacle_pillar_2">
+      <static>true</static>
+      <pose>-2 -2 1 0 0 0</pose>
+      <link name="link">
+        <collision name="c2"><geometry><cylinder><radius>0.5</radius><length>2</length></cylinder></geometry></collision>
+        <visual name="v2"><geometry><cylinder><radius>0.5</radius><length>2</length></cylinder></geometry></visual>
+      </link>
+    </model>
+  </world>
+</sdf>
