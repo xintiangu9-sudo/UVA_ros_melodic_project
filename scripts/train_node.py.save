@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import rospy
+import torch
+import torch.optim as optim
+import numpy as np
+from geometry_msgs.msg import Twist
+from sensor_msgs.msg import LaserScan
+from nav_msgs.msg import Odometry
+from std_srvs.srv import Empty  # 用于重置 Gazebo
+
+from torch.utils.tensorboard import SummaryWriter
+from collaborative_framework import DualUAVSystem
+from environment import FloodRescueEnvironment
+
+class SNNTrainerNode:
+    def __init__(self):
+        print(">>> [探针 1] 开始初始化 ROS 节点...")
+        rospy.init_node('snn_online_trainer', anonymous=True)
+        print(">>> [探针 2] 节点初始化成功！正在初始化模型和优化器...")
+        
+        # 1. 初始化模型、环境与优化器
+        self.model = DualUAVSystem()
+        self.optimizer = optim.Adam(self.model.parameters(), lr=1e-4)
+        self.env_logic = FloodRescueEnvironment()
+        
+        # ... (中间的 ROS 数据接口和 Subscriber/Publisher 代码保持不变) ...
+
+        print(">>> [探针 3] 正在等待 Gazebo 的重置服务 /gazebo/reset_world ... (如果卡在这里说明 Gazebo 没开好)")
+        rospy.wait_for_service('/gazebo/reset_world', timeout=10.0) # 加一个 10 秒超时，免得死等
+        self.reset_gazebo = rospy.ServiceProxy('/gazebo/reset_world', Empty)
+        print(">>> [探针 4] Gazebo 服务连接成功！准备进入训练循环。")
+
+        self.control_rate = rospy.Rate(5) # 5Hz 决策频率，给物理引擎反应时间
+        self.writer = SummaryWriter(log_dir='/home/guxintian/UVA/src/swarm_rescue/runs/snn_training')
+
+    # ================= ROS 回调函数 =================
+    def lidar_cb_1(self, msg):
+        ranges = np.array(msg.ranges)
+        ranges[np.isinf(ranges)] = msg.range_max
+        self.min_laser_dist1 = np.min(ranges) # 用于碰撞检测
+        downsampled = ranges[np.linspace(0, len(ranges)-1, 24, dtype=int)]
+        self.obs_uav1['lidar_spikes'] = torch.tensor(1.0 - (downsampled / msg.range_max), dtype=torch.float32).unsqueeze(0)
+
+    def lidar_cb_2(self, msg):
+        ranges = np.array(msg.ranges)
+        ranges[np.isinf(ranges)] = msg.range_max
+        self.min_laser_dist2 = np.min(ranges)
+        downsampled = ranges[np.linspace(0, len(ranges)-1, 24, dtype=int)]
+        self.obs_uav2['lidar_spikes'] = torch.tensor(1.0 - (downsampled / msg.range_max), dtype=torch.float32).unsqueeze(0)
+
+    def odom_cb_1(self, msg):
+        self.uav1_pos = [msg.pose.pose.position.x, msg.pose.pose.position.y]
+        self.obs_uav1['velocity'] = torch.tensor([msg.twist.twist.linear.x, msg.twist.twist.linear.y, msg.twist.twist.linear.z], dtype=torch.float32).unsqueeze(0)
+
+    def odom_cb_2(self, msg):
+        self.uav2_pos = [msg.pose.pose.position.x, msg.pose.pose.position.y]
+        self.obs_uav2['velocity'] = torch.tensor([msg.twist.twist.linear.x, msg.twist.twist.linear.y, msg.twist.twist.linear.z], dtype=torch.float32).unsqueeze(0)
+
+    # ================= 辅助函数 =================
+    def publish_action(self, action1, action2):
+        cmd1, cmd2 = Twist(), Twist()
+        # x, y 轴由网络控制，z 轴给一个基础升力让其悬停/探索，角速度由网络控制
+        cmd1.linear.x, cmd1.linear.y = action1[0]*1.0, action1[1]*1.0
+        cmd1.linear.z = 0.5  # 【新增】给予升力
+        cmd1.angular.z = action1[3]*0.5
+        
+        cmd2.linear.x, cmd2.linear.y = action2[0]*1.0, action2[1]*1.0
+        cmd2.linear.z = 0.5  # 【新增】给予升力
+        cmd2.angular.z = action2[3]*0.5
+        
+        self.cmd_pub_1.publish(0.5)
+        self.cmd_pub_2.publish(0.5)
+
+    # ================= 核心训练循环 =================\
+    def train_loop(self, max_episodes=1000, max_steps_per_ep=200):
+        rospy.loginfo("开始 SNN 在线训练...")
+        import os # 确保开头导入了 os
+        
+        for episode in range(max_episodes):
+            # 1. 重置物理引擎与奖励
+            self.reset_gazebo()
+            rospy.sleep(0.5) # 等待物理引擎稳定
+            
+            # 【新增】强制解锁两架无人机的电机
+            os.system("rosservice call /uav1/enable_motors true")
+            os.system("rosservice call /uav2/enable_motors true")
+            
+            episode_rewards = []
+            log_probs = [] # 用于策略梯度计算
+            
+            for step in range(max_steps_per_ep):
+                if rospy.is_shutdown(): break
+                
+                # 2. 前向传播计算动作
+                # 这里为了实现 RL 探索，我们将网络输出视为正态分布的均值
+                action_mean1, action_mean2 = self.model(self.obs_uav1, self.obs_uav2)
+                
+                # 构造分布并采样 (增加探索噪声)
+                dist1 = torch.distributions.Normal(action_mean1, 0.2)
+                dist2 = torch.distributions.Normal(action_mean2, 0.2)
+                
+                action1 = dist1.sample()
+                action2 = dist2.sample()
+                
+                # 记录采样的对数概率 (Policy Gradient 必须的项)
+                log_prob = dist1.log_prob(action1).sum() + dist2.log_prob(action2).sum()
+                log_probs.append(log_prob)
+
+                # 3. 与环境交互
+                self.publish_action(action1.squeeze().detach().numpy(), action2.squeeze().detach().numpy())
+                self.control_rate.sleep() # 等待动作在物理世界产生效果
+
+                # 4. 计算奖励
+                is_collision = self.check_collision()
+                r1, r2 = self.env_logic.calculate_reward(self.uav1_pos, self.uav2_pos, action1, action2, found_victim=False)
+                
+                step_reward = r1 + r2
+                if is_collision:
+                    step_reward -= 50.0 # 碰撞给予严厉惩罚
+                
+                episode_rewards.append(step_reward)
+
+                if is_collision:
+                    rospy.logwarn(f"发生碰撞！回合 {episode} 提前结束于第 {step} 步。")
+                    break
+
+            # 5. 回合结束：反向传播更新网络 (REINFORCE 算法)
+            total_reward = sum(episode_rewards)
+            rospy.loginfo(f"回合 {episode} 结束, 总奖励: {total_reward:.2f}")
+
+            # 计算累计折扣奖励 (Return)
+            returns = []
+            R = 0
+            for r in reversed(episode_rewards):
+                R = r + 0.99 * R # 折扣因子 gamma = 0.99
+                returns.insert(0, R)
+            returns = torch.tensor(returns)
+            # 奖励基线归一化，使得训练更稳定
+            returns = (returns - returns.mean()) / (returns.std() + 1e-5)
+
+            # 计算损失：Loss = -log(prob) * Return
+            policy_loss = []
+            for log_prob, R in zip(log_probs, returns):
+                policy_loss.append(-log_prob * R)
+            
+            loss = torch.stack(policy_loss).sum()
+
+            # 梯度下降
+            self.optimizer.zero_grad()
+            loss.backward()
+            
+            # 梯度裁剪防爆炸
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            self.optimizer.step()
+
+            rospy.loginfo(f"网络权重已更新，Loss: {loss.item():.4f}")
+            
+            # 【新增】将数据写入 TensorBoard
+            self.writer.add_scalar('Training/Episode_Reward', total_reward, episode)
+            self.writer.add_scalar('Training/Policy_Loss', loss.item(), episode)
+
+if __name__ == '__main__':
+    print(">>> 成功进入 Python main 函数！")
+    try:
+        trainer = SNNTrainerNode()
+        trainer.train_loop()
+    except rospy.ROSInterruptException:
+        pass
+    except rospy.ServiceException as e:
+        print(f">>> 服务调用失败: {e}")
+
